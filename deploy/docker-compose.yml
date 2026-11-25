@@ -1,0 +1,93 @@
+# 生产部署：Caddy（自动 HTTPS）+ new-api + PostgreSQL + Redis
+# 使用方法见 deploy/README.md。所有密码和密钥都从同目录的 .env 读取。
+
+services:
+  caddy:
+    image: caddy:2.8
+    container_name: caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      - DOMAIN=${DOMAIN}
+      - ACME_EMAIL=${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - new-api
+    networks:
+      - new-api-network
+
+  new-api:
+    image: ${NEW_API_IMAGE:-calciumion/new-api:latest}
+    container_name: new-api
+    restart: always
+    command: --log-dir /app/logs
+    # 不对外暴露 3000 端口，只通过 Caddy 访问
+    expose:
+      - "3000"
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
+    environment:
+      - SQL_DSN=postgresql://newapi:${POSTGRES_PASSWORD}@postgres:5432/new-api
+      - REDIS_CONN_STRING=redis://:${REDIS_PASSWORD}@redis:6379
+      - SESSION_SECRET=${SESSION_SECRET}
+      - CRYPTO_SECRET=${CRYPTO_SECRET}
+      - SESSION_COOKIE_SECURE=true
+      - SESSION_COOKIE_TRUSTED_URL=https://${DOMAIN}
+      # 只信任 Compose 内网里的 Caddy 转发的真实 IP
+      - TRUSTED_PROXIES=172.28.0.0/16
+      - TZ=${TZ:-Asia/Shanghai}
+      - DEFAULT_LANGUAGE=zh-CN
+      - ERROR_LOG_ENABLED=true
+      - BATCH_UPDATE_ENABLED=true
+      - NODE_NAME=new-api-node-1
+      - STREAMING_TIMEOUT=${STREAMING_TIMEOUT:-300}
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - new-api-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/status | grep -o '\"success\":\\s*true' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7
+    container_name: redis
+    restart: always
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    networks:
+      - new-api-network
+
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    restart: always
+    environment:
+      POSTGRES_USER: newapi
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: new-api
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - new-api-network
+
+volumes:
+  pg_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  new-api-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
